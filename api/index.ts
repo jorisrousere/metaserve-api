@@ -5,6 +5,7 @@ import express from "express";
 import cors from "cors";
 import { PrismaClient } from "@prisma/client";
 
+
 // Commentaire: imports pour les routes tournois
 import { z } from "zod";
 import { GraphQLClient, gql } from "graphql-request";
@@ -143,8 +144,8 @@ async function verifyAnySignature(opts: {
 function stripHiddenStats<T extends { durability?: unknown; potential?: unknown }>(row: T) {
   // Commentaire: retire durability et potential des objets
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { durability, potential, ...safe } = (row as unknown) as Record<string, unknown>;
-  return safe;
+  const { durability, potential, ...safe } = row as any;
+  return safe as Omit<T, "durability" | "potential">;
 }
 
 // -----------------------------------------------------------------------------
@@ -155,7 +156,7 @@ app.get("/api/health", (_, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// Commentaire: STATS JOUEURS (existant) avec masquage de durability et potential
+// Commentaire: STATS JOUEURS (existant)
 // -----------------------------------------------------------------------------
 
 // Commentaire: recupere une liste de stats par liste d ids
@@ -173,20 +174,8 @@ app.get("/api/player-stats", async (req, res) => {
     const rows = await prisma.playerStat.findMany({
       where: { tokenId: { in: ids } },
       orderBy: { tokenId: "asc" },
-      // Commentaire: select explicite pour eviter de remonter durability/potential
-      select: {
-        tokenId: true,
-        speed: true,
-        serve: true,
-        forehand: true,
-        backhand: true,
-        volley: true,
-        stamina: true,
-        mental: true,
-        overall: true,
-        // Commentaire: ne pas inclure durability ni potential
-      },
     });
+    // Commentaire: masque durability et potential avant reponse
     res.json(rows.map(stripHiddenStats));
   } catch (e: any) {
     res.status(500).json({ error: e?.message ?? String(e) });
@@ -201,22 +190,9 @@ app.get("/api/player-stats/:id", async (req, res) => {
     if (!Number.isFinite(id)) {
       return res.status(400).json({ error: "invalid id" });
     }
-    const row = await prisma.playerStat.findUnique({
-      where: { tokenId: id },
-      select: {
-        tokenId: true,
-        speed: true,
-        serve: true,
-        forehand: true,
-        backhand: true,
-        volley: true,
-        stamina: true,
-        mental: true,
-        overall: true,
-        // Commentaire: ne pas inclure durability ni potential
-      },
-    });
+    const row = await prisma.playerStat.findUnique({ where: { tokenId: id } });
     if (!row) return res.status(404).json({ error: "not found" });
+    // Commentaire: masque durability et potential avant reponse
     res.json(stripHiddenStats(row));
   } catch (e: any) {
     res.status(500).json({ error: e?.message ?? String(e) });
@@ -686,16 +662,9 @@ app.use("/api/auth", routerAuth);
 // =================== /ADD ONLY: routes d auth par wallet =====================
 
 // -----------------------------------------------------------------------------
-// Commentaire: compatibilite Vercel Serverless et dev local
+// Commentaire: lancement serveur
 // -----------------------------------------------------------------------------
-
-// Commentaire: export serverless pour Vercel
-export default app;
-
-// Commentaire: lancement serveur local uniquement si non Vercel
-if (!process.env.VERCEL) {
-  const port = parseInt(process.env.PORT || "4000", 10);
-  app.listen(port, () => {
-    console.log(`Server listening on http://localhost:${port}`);
-  });
-}
+const port = parseInt(process.env.PORT || "4000", 10);
+app.listen(port, () => {
+  console.log(`Server listening on http://localhost:${port}`);
+});
