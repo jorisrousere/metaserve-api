@@ -1,15 +1,163 @@
-// Commentaire: datasource pour Prisma avec Neon (PostgreSQL)
-// Commentaire: les commentaires sont en troisieme personne et sans accents
-
+// Commentaire: Prisma schema pour une base evolutive; SQLite pour dev, passage a Postgres facile
+//datasource db {
+//  provider = "sqlite"
+//  url      = env("DATABASE_URL")
+//}
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  url       = env("DATABASE_URL")  // pooled pour l app
+  directUrl = env("DIRECT_URL")    // direct pour migrations
 }
 
 generator client {
   provider = "prisma-client-js"
 }
 
-// Commentaire: inserer ici les modeles (playerStat, tournament, match, entry, wallet, userAccount, packInfo, etc.)
-// Commentaire: l API suppose que ces tables existent et correspondent aux routes
+// Commentaire: Modele PlayerStat centralise les stats par token ERC721
+model PlayerStat {
+  // Commentaire: tokenId est l identifiant du token ERC721
+  tokenId     Int    @id @map("token_id")
+  firstName   String @map("first_name")
+  lastName    String @map("last_name")
+  nationality String
+  age         Int
+
+  potential   Int
+  durability  Int
+  physical    Int
+  stamina     Int
+  energy      Int
+
+  serve       Int
+  return      Int
+  forehand    Int
+  backhand    Int
+  volley      Int
+  passing     Int
+
+  @@map("player_stats")
+  @@index([lastName, firstName])
+}
+
+
+
+// status should be one of: DRAFT, OPEN, LOCKED, IN_PROGRESS, FINISHED, CANCELED
+// round should be one of: R64, R32, R16, QF, SF, F
+// match status should be one of: PENDING, IN_PROGRESS, COMPLETED, WALKOVER
+
+model Wallet {
+  id        String    @id @default(cuid())
+  address   String    @unique
+  createdAt DateTime  @default(now())
+
+  entries   Entry[]
+}
+
+model Tournament {
+  id                  String    @id @default(cuid())
+  slug                String    @unique
+  title               String
+  description         String?
+  status              String    @default("DRAFT") // should be one of allowed statuses
+  capacity            Int
+  startsAt            DateTime
+  maxEntriesPerWallet Int       @default(3)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  entries             Entry[]
+  matches             Match[]
+  distributions       DistributionLog[]
+}
+
+model Entry {
+  id              String     @id @default(cuid())
+
+  tournamentId    String
+  tournament      Tournament  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  walletId        String
+  wallet          Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  contractAddress String
+  tokenId         String
+
+  createdAt       DateTime    @default(now())
+  uniqueEntry     String      @unique
+
+  matchesA        Match[]     @relation("MatchEntryA")
+  matchesB        Match[]     @relation("MatchEntryB")
+
+  @@index([contractAddress, tokenId])
+  @@unique([tournamentId, contractAddress, tokenId], name: "uniq_token_per_tournament")
+  @@unique([tournamentId, walletId, id], name: "uniq_wallet_entry_scoped")
+}
+
+model Match {
+  id            String     @id @default(cuid())
+
+  tournamentId  String
+  tournament    Tournament  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  round         String      // should be one of allowed rounds
+  status        String      @default("PENDING") // should be one of allowed match statuses
+
+  entryAId      String?
+  entryA        Entry?      @relation("MatchEntryA", fields: [entryAId], references: [id])
+
+  entryBId      String?
+  entryB        Entry?      @relation("MatchEntryB", fields: [entryBId], references: [id])
+
+  setsA         Int?
+  setsB         Int?
+  scoreline     String?
+
+  winnerEntryId String?
+  nextMatchId   String?
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model DistributionLog {
+  id              String     @id @default(cuid())
+
+  tournamentId    String
+  tournament      Tournament  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  entryId         String
+  contractAddress String
+  tokenId         String
+  finalOwner      String
+
+  createdAt       DateTime   @default(now())
+}
+
+model PackInfo {
+  packId        Int      @id
+  name          String
+  image         String?
+  description   String?
+  playersCount  Int      @default(1)
+  probCommon    Float    @default(0.0)
+  probRare      Float    @default(0.0)
+  probGold      Float    @default(0.0)
+  probPlatinum  Float    @default(0.0)
+  availableAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Comment: Nouveau modele pour lier un wallet a un compte app; additif uniquement
+model UserAccount {
+  id           Int      @id @default(autoincrement())
+  address      String   @unique           // Comment: adresse wallet en lowercase
+  email        String   @unique
+  username     String   @unique
+  referralCode String   @unique           // Comment: code parrainage genere
+  referredBy   String?                     // Comment: code du parrain (optionnel)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("user_accounts") // Comment: nom de table explicite pour eviter les collisions
+}
