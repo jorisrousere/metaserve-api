@@ -1,7 +1,6 @@
 // Commentaire: API Express pour exposer les stats et les tournois depuis la base
 // Commentaire: les commentaires sont en troisieme personne et sans accents
 
-import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { PrismaClient } from "@prisma/client";
