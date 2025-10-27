@@ -1,0 +1,15 @@
+// Commentaire: datasource pour Prisma avec Neon (PostgreSQL)
+// Commentaire: les commentaires sont en troisieme personne et sans accents
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Commentaire: inserer ici les modeles (playerStat, tournament, match, entry, wallet, userAccount, packInfo, etc.)
+// Commentaire: l API suppose que ces tables existent et correspondent aux routes
