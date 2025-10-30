@@ -5,12 +5,10 @@ import express from "express";
 import cors from "cors";
 import { PrismaClient } from "@prisma/client";
 
-
 // Commentaire: imports pour les routes tournois
 import { z } from "zod";
 import { GraphQLClient, gql } from "graphql-request";
 import {
-  verifyMessage,
   createPublicClient,
   http,
   parseAbi,
@@ -18,7 +16,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { base, baseSepolia } from "viem/chains";
+import { base } from "viem/chains";
 
 const prisma = new PrismaClient();
 const app = express();
@@ -79,17 +77,26 @@ async function fetchCurrentOwner(contractAddress: string, tokenId: string) {
 }
 
 // -----------------------------------------------------------------------------
-// Commentaire: helper verif signatures EOA + EIP-1271 (ajout minimal)
+// Commentaire: verif universelle EOA + EIP-1271 + ERC-6492 via viem Actions
 // -----------------------------------------------------------------------------
+
 const EIP1271_ABI = parseAbi([
-  "function isValidSignature(bytes32 _hash, bytes _signature) view returns (bytes4)"
+  "function isValidSignature(bytes32 _hash, bytes _signature) view returns (bytes4)",
 ]);
 const EIP1271_MAGIC = "0x1626ba7e";
 
 function pickChain(chainId?: number) {
-  // 84532 = Base Sepolia
+  // Commentaire: 84532 = Base Sepolia
   if (chainId === 84532) return baseSepolia;
   return base;
+}
+
+// Commentaire: helper 6492 simple pour log
+function looksLikeErc6492(sig: string): boolean {
+  if (typeof sig !== "string" || !sig.startsWith("0x")) return false;
+  const hex = sig.slice(2).toLowerCase();
+  if (hex.length < 8) return false;
+  return hex.endsWith("64926492") || hex.endsWith("064926492");
 }
 
 async function verifyAnySignature(opts: {
@@ -101,38 +108,60 @@ async function verifyAnySignature(opts: {
 }): Promise<boolean> {
   const client = createPublicClient({
     chain: pickChain(opts.chainId),
-    transport: http(opts.rpcUrl || process.env.RPC_URL || "")
+    transport: http(opts.rpcUrl || process.env.RPC_URL || ""),
   });
 
-  // Commentaire: normalise les sauts de ligne pour eviter les ecarts
+  // Commentaire: normalise les sauts de ligne
   const msg = opts.message.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-  // Commentaire: detecte si adresse est un contrat (smart account)
-  const code = await client.getBytecode({ address: opts.address });
-  const isContract = !!code && code !== "0x";
-
-  // Tentative EOA
-  if (!isContract) {
-    try {
-      const ok = await verifyMessage({ address: opts.address, message: msg, signature: opts.signature });
-      if (ok) return true;
-    } catch {
-      // continue vers 1271
+  // Commentaire: voie principale - Actions viem (gere EOA + 1271 + 6492)
+  try {
+    const ok = await client.verifyMessage({
+      address: opts.address,
+      message: msg,
+      signature: opts.signature,
+    });
+    if (ok) return true;
+  } catch (e) {
+    if (looksLikeErc6492(opts.signature)) {
+      console.warn("[verifyAnySignature] Signature 6492 detectee; verifier version de viem et du RPC");
     }
+    // continue vers fallback
   }
 
-  // Tentative EIP-1271
+  // Commentaire: fallback EOA si l adresse n est pas un contrat
   try {
-    const h = hashMessage(msg); // EIP-191
-    const res = await client.readContract({
-      address: opts.address,
-      abi: EIP1271_ABI,
-      functionName: "isValidSignature",
-      args: [h, opts.signature],
-    });
-    if (String(res).toLowerCase() === EIP1271_MAGIC) return true;
+    const code = await client.getBytecode({ address: opts.address });
+    const isContract = !!code && code !== "0x";
+    if (!isContract) {
+      // Commentaire: re-tente verifyMessage (erreurs transitoires possibles)
+      const ok2 = await client.verifyMessage({
+        address: opts.address,
+        message: msg,
+        signature: opts.signature,
+      });
+      if (ok2) return true;
+    }
   } catch {
-    // ignore et retourne false
+    // ignore
+  }
+
+  // Commentaire: fallback EIP-1271 manuel si smart wallet deploye
+  try {
+    const code = await client.getBytecode({ address: opts.address });
+    const isContract = !!code && code !== "0x";
+    if (isContract) {
+      const h = hashMessage(msg); // Commentaire: hash EIP-191
+      const res = await client.readContract({
+        address: opts.address,
+        abi: EIP1271_ABI,
+        functionName: "isValidSignature",
+        args: [h, opts.signature],
+      });
+      if (String(res).toLowerCase() === EIP1271_MAGIC) return true;
+    }
+  } catch {
+    // ignore
   }
 
   return false;
@@ -151,7 +180,7 @@ function stripHiddenStats<T extends { durability?: unknown; potential?: unknown 
 // -----------------------------------------------------------------------------
 // Commentaire: endpoint de sante
 // -----------------------------------------------------------------------------
-app.get("/api/health", (_, res) => {
+app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
@@ -303,16 +332,11 @@ app.post("/api/tournaments/:id/register", async (req, res) => {
     const { signature, timestamp } = parsed.data;
 
     // Commentaire: verifie la signature du message
-    // Utilise la chaine envoyee par le front si presente, sinon fallback historique
+    // Utilise la chaine envoyee par le front si presente, sinon reconstruit le message canonical
     const message =
       parsed.data.signedMessage && parsed.data.signedMessage.length > 0
         ? parsed.data.signedMessage
-        : buildRegistrationMessage(
-            t.id,
-            contractAddress,
-            tokenId,
-            timestamp
-          );
+        : buildRegistrationMessage(t.id, contractAddress, tokenId, timestamp);
 
     const ok = await verifyAnySignature({
       address: walletAddress as `0x${string}`,
@@ -536,7 +560,6 @@ app.post("/api/tournaments/:id/finish", async (req, res) => {
   }
 });
 
-
 // -----------------------------------------------------------------------------
 // Commentaire: route inline pour fournir les details des packs par id
 // -----------------------------------------------------------------------------
@@ -558,29 +581,31 @@ app.get("/api/pack-details", async (req, res) => {
     const map = new Map(rows.map((r) => [r.packId, r]));
     const out = ids.map((id) => {
       const r = map.get(id);
-      return r ? {
-        packId: r.packId,
-        name: r.name,
-        image: r.image,
-        description: r.description,
-        playersCount: r.playersCount,
-        probCommon: r.probCommon,
-        probRare: r.probRare,
-        probGold: r.probGold,
-        probPlatinum: r.probPlatinum,
-        availableAt: r.availableAt ? r.availableAt.toISOString() : null,
-      } : {
-        packId: id,
-        name: `Pack #${id}`,
-        image: null,
-        description: null,
-        playersCount: 1,
-        probCommon: 0,
-        probRare: 0,
-        probGold: 0,
-        probPlatinum: 0,
-        availableAt: null,
-      };
+      return r
+        ? {
+            packId: r.packId,
+            name: r.name,
+            image: r.image,
+            description: r.description,
+            playersCount: r.playersCount,
+            probCommon: r.probCommon,
+            probRare: r.probRare,
+            probGold: r.probGold,
+            probPlatinum: r.probPlatinum,
+            availableAt: r.availableAt ? r.availableAt.toISOString() : null,
+          }
+        : {
+            packId: id,
+            name: `Pack #${id}`,
+            image: null,
+            description: null,
+            playersCount: 1,
+            probCommon: 0,
+            probRare: 0,
+            probGold: 0,
+            probPlatinum: 0,
+            availableAt: null,
+          };
     });
 
     res.json(out);
@@ -592,10 +617,10 @@ app.get("/api/pack-details", async (req, res) => {
 // ===================== ADD ONLY: routes d auth par wallet =====================
 const routerAuth = express.Router();
 
-// Comment: utiliser un client Prisma isole pour ne pas impacter le reste
+// Commentaire: utiliser un client Prisma isole pour ne pas impacter le reste
 const prismaAuth = new PrismaClient();
 
-// Comment: helpers locaux
+// Commentaire: helpers locaux
 function toLowerHexAuth(s: string) {
   return (s || "").toLowerCase();
 }
@@ -652,12 +677,12 @@ routerAuth.post("/register", async (req, res) => {
     });
     res.status(201).json({ ok: true, user: created });
   } catch (e: any) {
-    if (e?.code === "P2002") return res.status(409).json({ error: "duplicate field", meta: e?.meta });
+    if ((e as any)?.code === "P2002") return res.status(409).json({ error: "duplicate field", meta: (e as any)?.meta });
     res.status(500).json({ error: e?.message ?? "server error" });
   }
 });
 
-// Comment: montee du routeur sous /api/auth sans toucher aux autres routes
+// Commentaire: montee du routeur sous /api/auth sans toucher aux autres routes
 app.use("/api/auth", routerAuth);
 // =================== /ADD ONLY: routes d auth par wallet =====================
 
